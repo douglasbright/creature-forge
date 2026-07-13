@@ -1,0 +1,129 @@
+import RAPIER from '@dimforge/rapier3d-compat';
+import * as THREE from 'three';
+
+export interface GroundHit {
+  point: THREE.Vector3;
+  normal: THREE.Vector3;
+  distance: number;
+  colliderHandle: number;
+}
+
+export interface DynamicBodyVisual {
+  body: RAPIER.RigidBody;
+  object: THREE.Object3D;
+}
+
+export class PhysicsWorld {
+  world!: RAPIER.World;
+  readonly dynamicVisuals: DynamicBodyVisual[] = [];
+  private ready = false;
+
+  async initialise(): Promise<void> {
+    if (this.ready) return;
+    await RAPIER.init();
+    this.world = new RAPIER.World({ x: 0, y: -9.81, z: 0 });
+    this.world.timestep = 1 / 60;
+    this.ready = true;
+  }
+
+  get isReady(): boolean {
+    return this.ready;
+  }
+
+  addFixedCuboid(
+    position: THREE.Vector3,
+    halfExtents: THREE.Vector3,
+    rotation = new THREE.Quaternion(),
+    friction = 1,
+  ): RAPIER.Collider {
+    const body = this.world.createRigidBody(
+      RAPIER.RigidBodyDesc.fixed()
+        .setTranslation(position.x, position.y, position.z)
+        .setRotation(rotation),
+    );
+    return this.world.createCollider(
+      RAPIER.ColliderDesc.cuboid(halfExtents.x, halfExtents.y, halfExtents.z)
+        .setFriction(friction)
+        .setRestitution(0.02),
+      body,
+    );
+  }
+
+  addDynamicCuboid(
+    position: THREE.Vector3,
+    halfExtents: THREE.Vector3,
+    object: THREE.Object3D,
+    density = 0.35,
+  ): RAPIER.RigidBody {
+    const body = this.world.createRigidBody(
+      RAPIER.RigidBodyDesc.dynamic()
+        .setTranslation(position.x, position.y, position.z)
+        .setLinearDamping(0.35)
+        .setAngularDamping(0.5),
+    );
+    this.world.createCollider(
+      RAPIER.ColliderDesc.cuboid(halfExtents.x, halfExtents.y, halfExtents.z)
+        .setDensity(density)
+        .setFriction(0.8)
+        .setRestitution(0.08),
+      body,
+    );
+    this.dynamicVisuals.push({ body, object });
+    return body;
+  }
+
+  raycastGround(position: THREE.Vector3, startHeight = 2.5, maxDistance = 6): GroundHit | null {
+    if (!this.ready) return null;
+    const origin = { x: position.x, y: position.y + startHeight, z: position.z };
+    const direction = { x: 0, y: -1, z: 0 };
+    const ray = new RAPIER.Ray(origin, direction);
+    const hit = this.world.castRayAndGetNormal(ray, maxDistance, true);
+    if (!hit) return null;
+    const distance = hit.timeOfImpact;
+    const point = new THREE.Vector3(origin.x, origin.y - distance, origin.z);
+    const normal = new THREE.Vector3(hit.normal.x, hit.normal.y, hit.normal.z).normalize();
+    return { point, normal, distance, colliderHandle: hit.collider.handle };
+  }
+
+
+  raycast(origin: THREE.Vector3, direction: THREE.Vector3, maxDistance: number): GroundHit | null {
+    if (!this.ready || direction.lengthSq() < 1e-8) return null;
+    const dir = direction.clone().normalize();
+    const ray = new RAPIER.Ray(
+      { x: origin.x, y: origin.y, z: origin.z },
+      { x: dir.x, y: dir.y, z: dir.z },
+    );
+    const hit = this.world.castRayAndGetNormal(ray, maxDistance, true);
+    if (!hit) return null;
+    const point = origin.clone().addScaledVector(dir, hit.timeOfImpact);
+    return {
+      point,
+      normal: new THREE.Vector3(hit.normal.x, hit.normal.y, hit.normal.z).normalize(),
+      distance: hit.timeOfImpact,
+      colliderHandle: hit.collider.handle,
+    };
+  }
+
+  step(delta: number): number {
+    if (!this.ready) return 0;
+    const started = performance.now();
+    this.world.timestep = Math.min(1 / 30, Math.max(1 / 120, delta));
+    this.world.step();
+    for (const entry of this.dynamicVisuals) {
+      const translation = entry.body.translation();
+      const rotation = entry.body.rotation();
+      entry.object.position.set(translation.x, translation.y, translation.z);
+      entry.object.quaternion.set(rotation.x, rotation.y, rotation.z, rotation.w);
+    }
+    return performance.now() - started;
+  }
+
+  resetDynamicBodies(): void {
+    this.dynamicVisuals.forEach((entry, index) => {
+      entry.body.setTranslation({ x: 3.2 + index * 0.65, y: 0.75 + index * 0.25, z: 2.4 }, true);
+      entry.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+      entry.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+      entry.body.setRotation({ x: 0, y: 0, z: 0, w: 1 }, true);
+    });
+  }
+}

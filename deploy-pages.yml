@@ -1,0 +1,15 @@
+import './style.css';
+import { App } from './App';
+
+const loading = document.createElement('div');
+loading.className = 'boot-screen';
+loading.innerHTML = '<div class="boot-mark">CF</div><strong>Building the creature lab…</strong><span>Initialising Rapier physics</span>';
+document.querySelector('#app')!.append(loading);
+
+const app = new App();
+app.initialise()
+  .then(() => loading.remove())
+  .catch((error) => {
+    console.error(error);
+    loading.innerHTML = `<strong>Creature Forge could not start.</strong><span>${error instanceof Error ? error.message : String(error)}</span>`;
+  });

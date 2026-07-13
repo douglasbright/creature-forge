@@ -1,0 +1,511 @@
+import type {
+  CreatureDefinition,
+  CreatureStats,
+  DebugFlags,
+  LimbRole,
+  LocomotionTuning,
+} from '../core/types';
+import type { LocomotionSnapshot } from '../animation/LocomotionController';
+import type { EditorSelection, PalettePart } from '../editor/EditorController';
+import { PRESET_LABELS, PRESETS } from '../core/presets';
+
+export interface UIActions {
+  onMode: (mode: 'edit' | 'test') => void;
+  onPreset: (key: keyof typeof PRESETS) => void;
+  onUndo: () => void;
+  onRedo: () => void;
+  onSave: () => void;
+  onResetCreature: () => void;
+  onLoad: (file: File) => void;
+  onSymmetry: (enabled: boolean) => void;
+  onTransformMode: (mode: 'translate' | 'rotate' | 'scale') => void;
+  onDuplicate: () => void;
+  onMirror: () => void;
+  onDelete: () => void;
+  onCreatureName: (name: string) => void;
+  onBodyChange: (id: string, field: 'name' | 'scaleX' | 'scaleY' | 'scaleZ', value: string | number) => void;
+  onAddBodySegment: (id: string) => void;
+  onLimbRole: (id: string, role: LimbRole) => void;
+  onLimbSegment: (id: string, segmentIndex: number, field: 'length' | 'radius', value: number) => void;
+  onAddLimbSegment: (id: string) => void;
+  onRemoveLimbSegment: (id: string) => void;
+  onEffectorScale: (id: string, axis: 'x' | 'y' | 'z', value: number) => void;
+  onBendDirection: (id: string, axis: 'x' | 'y' | 'z', value: number) => void;
+  onDebug: (key: keyof DebugFlags, enabled: boolean) => void;
+  onTuning: (key: keyof LocomotionTuning, value: number) => void;
+  onResetPosition: () => void;
+  onRecover: () => void;
+  onFollowCamera: (enabled: boolean) => void;
+  onClickToMove: (enabled: boolean) => void;
+  onResetObjects: () => void;
+}
+
+const paletteParts: Array<{ id: PalettePart; icon: string; title: string; subtitle: string }> = [
+  { id: 'leg-basic', icon: '⌁', title: 'Adaptive leg', subtitle: '2 joints · auto role' },
+  { id: 'leg-long', icon: '⟋', title: 'Long leg', subtitle: 'Wide stride' },
+  { id: 'leg-three', icon: '〽', title: 'Triple leg', subtitle: '3-joint chain' },
+  { id: 'arm-basic', icon: '∿', title: 'Grasping arm', subtitle: 'Manipulator' },
+  { id: 'arm-long', icon: '⤴', title: 'Long arm', subtitle: 'Extra reach' },
+  { id: 'balance-arm', icon: '↝', title: 'Balance arm', subtitle: 'Counterweight' },
+  { id: 'tail', icon: '〜', title: 'Tail', subtitle: 'Two segments' },
+  { id: 'eye', icon: '◉', title: 'Eye', subtitle: 'Expressive' },
+  { id: 'horn', icon: '△', title: 'Horn', subtitle: 'Decoration' },
+  { id: 'ear', icon: '◇', title: 'Ear', subtitle: 'Decoration' },
+  { id: 'fin', icon: '◢', title: 'Fin', subtitle: 'Decoration' },
+];
+
+export class UI {
+  readonly root: HTMLElement;
+  readonly viewport: HTMLElement;
+  readonly canvasHost: HTMLElement;
+  private readonly inspector: HTMLElement;
+  private readonly statsPanel: HTMLElement;
+  private readonly runtimePanel: HTMLElement;
+  private readonly modeButtons: Record<'edit' | 'test', HTMLButtonElement>;
+  private readonly symmetryInput: HTMLInputElement;
+  private readonly undoButton: HTMLButtonElement;
+  private readonly redoButton: HTMLButtonElement;
+  private readonly fpsLabel: HTMLElement;
+  private readonly physicsLabel: HTMLElement;
+  private readonly testControls: HTMLElement;
+  private mode: 'edit' | 'test' = 'edit';
+  private activePalettePart: PalettePart | null = null;
+  private armedPalettePart: PalettePart | null = null;
+
+  constructor(private readonly actions: UIActions, debug: DebugFlags, tuning: LocomotionTuning) {
+    const root = document.createElement('div');
+    root.className = 'app-shell';
+    root.innerHTML = `
+      <header class="topbar glass-panel">
+        <div class="brand">
+          <div class="brand-mark">CF</div>
+          <div><strong>Creature Forge</strong><span>Anatomy-driven creator</span></div>
+        </div>
+        <div class="top-actions">
+          <label class="preset-field">Starter
+            <select id="preset-select"></select>
+          </label>
+          <div class="mode-switch" aria-label="Mode">
+            <button id="edit-mode" class="active">Edit</button>
+            <button id="test-mode">Test</button>
+          </div>
+          <button id="undo-button" class="icon-button" title="Undo (Ctrl/Cmd+Z)">↶</button>
+          <button id="redo-button" class="icon-button" title="Redo">↷</button>
+          <button id="reset-creature" class="soft-button">Reset</button>
+          <button id="save-button" class="soft-button">Save JSON</button>
+          <button id="load-button" class="soft-button">Load</button>
+          <input id="load-input" type="file" accept="application/json,.json" hidden />
+        </div>
+      </header>
+      <aside class="palette glass-panel">
+        <div class="panel-title-row"><div><span class="eyebrow">PARTS</span><h2>Build anatomy</h2></div></div>
+        <p class="panel-help">Drag a part onto any highlighted body surface. Attachment nodes are generated under your pointer.</p>
+        <div id="palette-grid" class="palette-grid"></div>
+        <div class="symmetry-card">
+          <div><strong>Bilateral symmetry</strong><span>Mirror new parts and surface edits</span></div>
+          <label class="toggle"><input id="symmetry-toggle" type="checkbox" checked><span></span></label>
+        </div>
+        <div class="tool-row">
+          <button data-transform="translate" class="tool active" title="Move body segment">Move</button>
+          <button data-transform="rotate" class="tool" title="Rotate body segment">Rotate</button>
+          <button data-transform="scale" class="tool" title="Scale body segment">Scale</button>
+        </div>
+      </aside>
+      <main id="viewport" class="viewport">
+        <div id="canvas-host" class="canvas-host"></div>
+        <div class="viewport-vignette"></div>
+        <div id="drop-hint" class="drop-hint">Release to attach</div>
+        <div id="runtime-panel" class="runtime-panel glass-panel"></div>
+        <div id="test-controls" class="test-controls glass-panel">
+          <span><kbd>WASD</kbd> move</span><span><kbd>Q / E</kbd> turn</span><span><kbd>Shift</kbd> faster</span><span>Drag to orbit</span>
+          <label><input id="follow-camera" type="checkbox" checked> Follow camera</label>
+          <label><input id="click-move" type="checkbox"> Click to move</label>
+          <button id="reset-position">Reset creature</button>
+          <button id="recover">Recover</button>
+          <button id="reset-objects">Reset boxes</button>
+        </div>
+      </main>
+      <aside class="right-panel glass-panel">
+        <section class="creature-name-row">
+          <label><span class="eyebrow">CREATURE</span><input id="creature-name" maxlength="40"></label>
+        </section>
+        <section>
+          <div class="section-heading"><h2>Selected part</h2></div>
+          <div id="inspector" class="inspector"></div>
+        </section>
+        <section>
+          <div class="section-heading"><h2>Creature analysis</h2><span id="stand-badge" class="status-badge"></span></div>
+          <div id="stats-panel" class="stats-grid"></div>
+        </section>
+        <details class="developer-panel">
+          <summary><span>Developer diagnostics</span><span class="perf"><b id="fps-label">-- FPS</b><b id="physics-label">-- ms physics</b></span></summary>
+          <div class="debug-columns">
+            <div><h3>Visualise</h3><div id="debug-toggles" class="toggle-list"></div></div>
+            <div><h3>Locomotion tuning</h3><div id="tuning-controls"></div></div>
+          </div>
+        </details>
+      </aside>
+      <div id="toast" class="toast"></div>
+    `;
+    document.querySelector('#app')!.append(root);
+    this.root = root;
+    this.viewport = root.querySelector('#viewport')!;
+    this.canvasHost = root.querySelector('#canvas-host')!;
+    this.inspector = root.querySelector('#inspector')!;
+    this.statsPanel = root.querySelector('#stats-panel')!;
+    this.runtimePanel = root.querySelector('#runtime-panel')!;
+    this.testControls = root.querySelector('#test-controls')!;
+    this.modeButtons = {
+      edit: root.querySelector('#edit-mode')!,
+      test: root.querySelector('#test-mode')!,
+    };
+    this.symmetryInput = root.querySelector('#symmetry-toggle')!;
+    this.undoButton = root.querySelector('#undo-button')!;
+    this.redoButton = root.querySelector('#redo-button')!;
+    this.fpsLabel = root.querySelector('#fps-label')!;
+    this.physicsLabel = root.querySelector('#physics-label')!;
+
+    this.buildPalette();
+    this.buildPresets();
+    this.buildDebugControls(debug);
+    this.buildTuningControls(tuning);
+    this.bindStaticActions();
+    this.setMode('edit');
+  }
+
+  setMode(mode: 'edit' | 'test'): void {
+    this.mode = mode;
+    this.modeButtons.edit.classList.toggle('active', mode === 'edit');
+    this.modeButtons.test.classList.toggle('active', mode === 'test');
+    this.root.classList.toggle('test-mode-active', mode === 'test');
+    this.testControls.classList.toggle('visible', mode === 'test');
+  }
+
+  setDropActive(active: boolean): void {
+    this.root.querySelector('#drop-hint')!.classList.toggle('visible', active);
+  }
+
+  getDraggedPart(): PalettePart | null {
+    return this.activePalettePart;
+  }
+
+  getArmedPart(): PalettePart | null {
+    return this.armedPalettePart;
+  }
+
+  clearArmedPart(): void {
+    this.armedPalettePart = null;
+    this.root.querySelectorAll('.palette-item.armed').forEach((item) => item.classList.remove('armed'));
+    this.root.classList.remove('part-armed');
+    const hint = this.root.querySelector('#drop-hint');
+    if (hint) {
+      hint.textContent = 'Release to attach';
+      hint.classList.remove('visible');
+    }
+  }
+
+  setCreature(creature: CreatureDefinition): void {
+    (this.root.querySelector('#creature-name') as HTMLInputElement).value = creature.name;
+    this.symmetryInput.checked = creature.symmetry;
+  }
+
+  setHistory(canUndo: boolean, canRedo: boolean): void {
+    this.undoButton.disabled = !canUndo;
+    this.redoButton.disabled = !canRedo;
+  }
+
+  renderInspector(creature: CreatureDefinition, selection: EditorSelection): void {
+    this.inspector.replaceChildren();
+    if (!selection.id || !selection.type) {
+      this.inspector.innerHTML = `
+        <div class="empty-state"><div class="empty-icon">✦</div><strong>Select a body part</strong>
+        <p>Click a body section for transform handles, or drag a glowing limb root along the surface.</p></div>`;
+      return;
+    }
+
+    if (selection.type === 'body') {
+      const body = creature.body.find((entry) => entry.id === selection.id);
+      if (!body) return;
+      const panel = document.createElement('div');
+      panel.innerHTML = `
+        <div class="selection-title"><div class="selection-orb body"></div><div><strong>${escapeHtml(body.name)}</strong><span>${body.kind} segment</span></div></div>
+        <label class="field">Name<input data-field="name" value="${escapeAttribute(body.name)}"></label>
+        <div class="field-group"><span>Dimensions</span>
+          ${rangeField('Width', 'scaleX', body.scale.x, 0.15, 1.8, 0.01)}
+          ${rangeField('Height', 'scaleY', body.scale.y, 0.15, 1.8, 0.01)}
+          ${rangeField('Depth', 'scaleZ', body.scale.z, 0.15, 1.8, 0.01)}
+        </div>
+        <p class="microcopy">Use Move, Rotate or Scale above the viewport for direct 3D editing.</p>
+        <div class="button-grid">
+          <button data-action="add-segment">Add connected segment</button>
+          <button data-action="delete" class="danger">Delete segment</button>
+        </div>`;
+      this.inspector.append(panel);
+      panel.querySelectorAll<HTMLInputElement>('[data-field]').forEach((input) => {
+        const field = input.dataset.field as 'name' | 'scaleX' | 'scaleY' | 'scaleZ';
+        input.addEventListener('change', () => this.actions.onBodyChange(body.id, field, field === 'name' ? input.value : Number(input.value)));
+        input.addEventListener('input', () => {
+          const output = input.parentElement?.querySelector('output');
+          if (output) output.textContent = Number(input.value).toFixed(2);
+        });
+      });
+      panel.querySelector('[data-action="add-segment"]')?.addEventListener('click', () => this.actions.onAddBodySegment(body.id));
+      panel.querySelector('[data-action="delete"]')?.addEventListener('click', this.actions.onDelete);
+      return;
+    }
+
+    if (selection.type === 'limb') {
+      const limb = creature.limbs.find((entry) => entry.id === selection.id);
+      if (!limb) return;
+      const panel = document.createElement('div');
+      const segmentControls = limb.segments.map((segment, index) => `
+        <div class="segment-card"><div class="segment-header"><strong>Segment ${index + 1}</strong><span>${segment.length.toFixed(2)} m</span></div>
+        ${rangeField('Length', `length-${index}`, segment.length, 0.2, 1.2, 0.01)}
+        ${rangeField('Thickness', `radius-${index}`, segment.radius, 0.05, 0.28, 0.005)}</div>`).join('');
+      panel.innerHTML = `
+        <div class="selection-title"><div class="selection-orb limb"></div><div><strong>${escapeHtml(limb.name)}</strong><span>${limb.side} · ${limb.segments.length}-segment chain</span></div></div>
+        <label class="field">Semantic role<select data-field="role">
+          ${['auto', 'locomotion', 'support', 'manipulator', 'balance', 'decorative'].map((role) => `<option value="${role}" ${limb.role === role ? 'selected' : ''}>${role}</option>`).join('')}
+        </select></label>
+        <div class="inference-note"><span>Inferred now</span><strong>${limb.inferredRole ?? limb.role}</strong></div>
+        <div class="field-group"><span>Joint chain</span>${segmentControls}</div>
+        <div class="button-grid"><button data-action="add-joint">Add joint</button><button data-action="remove-joint">Remove joint</button></div>
+        <div class="field-group"><span>Preferred bend direction</span>
+          ${rangeField('Side', 'bend-x', limb.bendDirection.x, -1, 1, 0.05)}
+          ${rangeField('Up/down', 'bend-y', limb.bendDirection.y, -1, 1, 0.05)}
+          ${rangeField('Forward', 'bend-z', limb.bendDirection.z, -1, 1, 0.05)}
+        </div>
+        <div class="field-group"><span>Hand / foot size</span>
+          ${rangeField('Width', 'effector-x', limb.endEffectorScale.x, 0.08, 0.6, 0.01)}
+          ${rangeField('Height', 'effector-y', limb.endEffectorScale.y, 0.05, 0.4, 0.01)}
+          ${rangeField('Length', 'effector-z', limb.endEffectorScale.z, 0.08, 0.7, 0.01)}
+        </div>
+        <div class="button-grid three"><button data-action="duplicate">Duplicate</button><button data-action="mirror">Mirror</button><button data-action="delete" class="danger">Delete</button></div>`;
+      this.inspector.append(panel);
+      panel.querySelector<HTMLSelectElement>('[data-field="role"]')?.addEventListener('change', (event) => {
+        this.actions.onLimbRole(limb.id, (event.target as HTMLSelectElement).value as LimbRole);
+      });
+      limb.segments.forEach((_segment, index) => {
+        for (const field of ['length', 'radius'] as const) {
+          const input = panel.querySelector<HTMLInputElement>(`[data-field="${field}-${index}"]`)!;
+          input.addEventListener('change', () => this.actions.onLimbSegment(limb.id, index, field, Number(input.value)));
+          input.addEventListener('input', () => {
+            const output = input.parentElement?.querySelector('output');
+            if (output) output.textContent = Number(input.value).toFixed(2);
+          });
+        }
+      });
+      for (const axis of ['x', 'y', 'z'] as const) {
+        const bendInput = panel.querySelector<HTMLInputElement>(`[data-field="bend-${axis}"]`)!;
+        bendInput.addEventListener('change', () => this.actions.onBendDirection(limb.id, axis, Number(bendInput.value)));
+        bendInput.addEventListener('input', () => {
+          const output = bendInput.parentElement?.querySelector('output');
+          if (output) output.textContent = Number(bendInput.value).toFixed(2);
+        });
+        const input = panel.querySelector<HTMLInputElement>(`[data-field="effector-${axis}"]`)!;
+        input.addEventListener('change', () => this.actions.onEffectorScale(limb.id, axis, Number(input.value)));
+        input.addEventListener('input', () => {
+          const output = input.parentElement?.querySelector('output');
+          if (output) output.textContent = Number(input.value).toFixed(2);
+        });
+      }
+      panel.querySelector('[data-action="add-joint"]')?.addEventListener('click', () => this.actions.onAddLimbSegment(limb.id));
+      panel.querySelector('[data-action="remove-joint"]')?.addEventListener('click', () => this.actions.onRemoveLimbSegment(limb.id));
+      panel.querySelector('[data-action="duplicate"]')?.addEventListener('click', this.actions.onDuplicate);
+      panel.querySelector('[data-action="mirror"]')?.addEventListener('click', this.actions.onMirror);
+      panel.querySelector('[data-action="delete"]')?.addEventListener('click', this.actions.onDelete);
+      return;
+    }
+
+    const decoration = creature.decorations.find((entry) => entry.id === selection.id);
+    this.inspector.innerHTML = decoration
+      ? `<div class="selection-title"><div class="selection-orb accent"></div><div><strong>${decoration.kind}</strong><span>decorative attachment</span></div></div><button id="delete-decoration" class="full danger">Delete decoration</button>`
+      : '';
+    this.inspector.querySelector('#delete-decoration')?.addEventListener('click', this.actions.onDelete);
+  }
+
+  renderStats(stats: CreatureStats): void {
+    const items = [
+      ['Mass estimate', `${stats.mass.toFixed(1)} u`],
+      ['Locomotion legs', String(stats.legCount)],
+      ['Arms', String(stats.armCount)],
+      ['COM height', `${stats.centreOfMassHeight.toFixed(2)} m`],
+      ['Stability', `${Math.round(stats.stability * 100)}%`],
+      ['Step height', `${stats.maxStepHeight.toFixed(2)} m`],
+      ['Suggested gait', stats.suggestedGait],
+    ];
+    this.statsPanel.innerHTML = items.map(([label, value], index) => `
+      <div class="stat ${index === items.length - 1 ? 'wide' : ''}"><span>${label}</span><strong>${value}</strong></div>`).join('');
+    const badge = this.root.querySelector('#stand-badge')!;
+    badge.textContent = stats.canStand ? 'Can stand' : 'Needs support';
+    badge.classList.toggle('good', stats.canStand);
+  }
+
+  updateRuntime(snapshot: LocomotionSnapshot): void {
+    this.runtimePanel.innerHTML = `
+      <div><span>STATE</span><strong>${snapshot.state}</strong></div>
+      <div><span>SPEED</span><strong>${snapshot.speed.toFixed(2)} m/s</strong></div>
+      <div class="runtime-gait"><span>GAIT</span><strong>${snapshot.gait}</strong></div>
+      <div><span>LIVE STABILITY</span><strong>${Math.round(snapshot.stability * 100)}%</strong></div>`;
+  }
+
+  updatePerformance(fps: number, physicsMs: number): void {
+    this.fpsLabel.textContent = `${fps.toFixed(0)} FPS`;
+    this.physicsLabel.textContent = `${physicsMs.toFixed(2)} ms physics`;
+  }
+
+  setPerformanceVisible(visible: boolean): void {
+    (this.root.querySelector('.perf') as HTMLElement).style.display = visible ? 'flex' : 'none';
+  }
+
+  toast(message: string, tone: 'normal' | 'error' = 'normal'): void {
+    const toast = this.root.querySelector('#toast')!;
+    toast.textContent = message;
+    toast.classList.toggle('error', tone === 'error');
+    toast.classList.add('visible');
+    window.setTimeout(() => toast.classList.remove('visible'), 2200);
+  }
+
+  private buildPalette(): void {
+    const grid = this.root.querySelector('#palette-grid')!;
+    paletteParts.forEach((part) => {
+      const item = document.createElement('div');
+      item.className = 'palette-item';
+      item.draggable = true;
+      item.dataset.part = part.id;
+      item.innerHTML = `<div class="part-icon">${part.icon}</div><div><strong>${part.title}</strong><span>${part.subtitle}</span></div><div class="drag-dots">⋮⋮</div>`;
+      item.addEventListener('dragstart', (event) => {
+        event.dataTransfer?.setData('application/x-creature-part', part.id);
+        event.dataTransfer?.setData('text/plain', part.id);
+        if (event.dataTransfer) event.dataTransfer.effectAllowed = 'copy';
+        this.activePalettePart = part.id;
+        item.classList.add('dragging');
+      });
+      item.addEventListener('dragend', () => {
+        this.activePalettePart = null;
+        item.classList.remove('dragging');
+      });
+      item.addEventListener('click', () => {
+        const wasArmed = this.armedPalettePart === part.id;
+        this.clearArmedPart();
+        if (!wasArmed) {
+          this.armedPalettePart = part.id;
+          item.classList.add('armed');
+          this.root.classList.add('part-armed');
+          const hint = this.root.querySelector('#drop-hint')!;
+          hint.textContent = `Tap a valid surface to attach ${part.title.toLowerCase()}`;
+          hint.classList.add('visible');
+        } else {
+          const hint = this.root.querySelector('#drop-hint')!;
+          hint.textContent = 'Release to attach';
+          hint.classList.remove('visible');
+        }
+      });
+      grid.append(item);
+    });
+  }
+
+  private buildPresets(): void {
+    const select = this.root.querySelector('#preset-select') as HTMLSelectElement;
+    Object.entries(PRESET_LABELS).forEach(([key, label]) => {
+      const option = document.createElement('option');
+      option.value = key;
+      option.textContent = label;
+      select.append(option);
+    });
+    select.addEventListener('change', () => this.actions.onPreset(select.value as keyof typeof PRESETS));
+  }
+
+  private buildDebugControls(debug: DebugFlags): void {
+    const labels: Record<keyof DebugFlags, string> = {
+      skeleton: 'Skeleton',
+      colliders: 'Physics colliders',
+      centreOfMass: 'Centre of mass',
+      supportPolygon: 'Support polygon',
+      footTargets: 'Foot targets',
+      raycasts: 'Ground raycasts',
+      gaitPhase: 'Gait phase',
+      jointLimits: 'Joint limits',
+      bodyVelocity: 'Body velocity',
+      frameRate: 'Frame rate',
+    };
+    const container = this.root.querySelector('#debug-toggles')!;
+    (Object.keys(debug) as Array<keyof DebugFlags>).forEach((key) => {
+      const label = document.createElement('label');
+      label.innerHTML = `<input type="checkbox" ${debug[key] ? 'checked' : ''}><span>${labels[key]}</span>`;
+      label.querySelector('input')!.addEventListener('change', (event) => this.actions.onDebug(key, (event.target as HTMLInputElement).checked));
+      container.append(label);
+    });
+  }
+
+  private buildTuningControls(tuning: LocomotionTuning): void {
+    const settings: Array<[keyof LocomotionTuning, string, number, number, number]> = [
+      ['stepLength', 'Step length', 0.1, 1, 0.01],
+      ['stepHeight', 'Step height', 0.04, 0.55, 0.01],
+      ['stepDuration', 'Step duration', 0.25, 1.4, 0.01],
+      ['stanceRatio', 'Foot planting', 0.5, 0.88, 0.01],
+      ['bodySpring', 'Body spring', 1, 18, 0.1],
+      ['balanceCorrection', 'Balance correction', 0, 2.5, 0.05],
+      ['armSwing', 'Arm influence', 0, 1.8, 0.05],
+      ['tailCounterbalance', 'Tail influence', 0, 2, 0.05],
+      ['maxSlopeDegrees', 'Maximum slope', 5, 45, 1],
+      ['maxStepHeight', 'Maximum step', 0.08, 0.75, 0.01],
+    ];
+    const container = this.root.querySelector('#tuning-controls')!;
+    settings.forEach(([key, label, min, max, step]) => {
+      const wrapper = document.createElement('label');
+      wrapper.className = 'tuning-row';
+      wrapper.innerHTML = `<span>${label}</span><input type="range" min="${min}" max="${max}" step="${step}" value="${tuning[key]}"><output>${tuning[key].toFixed(step < 0.1 ? 2 : 1)}</output>`;
+      const input = wrapper.querySelector('input')!;
+      const output = wrapper.querySelector('output')!;
+      input.addEventListener('input', () => {
+        output.textContent = Number(input.value).toFixed(step < 0.1 ? 2 : 1);
+        this.actions.onTuning(key, Number(input.value));
+      });
+      container.append(wrapper);
+    });
+  }
+
+  private bindStaticActions(): void {
+    this.modeButtons.edit.addEventListener('click', () => this.actions.onMode('edit'));
+    this.modeButtons.test.addEventListener('click', () => this.actions.onMode('test'));
+    this.undoButton.addEventListener('click', this.actions.onUndo);
+    this.redoButton.addEventListener('click', this.actions.onRedo);
+    this.root.querySelector('#reset-creature')!.addEventListener('click', this.actions.onResetCreature);
+    this.root.querySelector('#save-button')!.addEventListener('click', this.actions.onSave);
+    const loadInput = this.root.querySelector('#load-input') as HTMLInputElement;
+    this.root.querySelector('#load-button')!.addEventListener('click', () => loadInput.click());
+    loadInput.addEventListener('change', () => {
+      const file = loadInput.files?.[0];
+      if (file) this.actions.onLoad(file);
+      loadInput.value = '';
+    });
+    this.symmetryInput.addEventListener('change', () => this.actions.onSymmetry(this.symmetryInput.checked));
+    this.root.querySelectorAll<HTMLButtonElement>('[data-transform]').forEach((button) => {
+      button.addEventListener('click', () => {
+        this.root.querySelectorAll('[data-transform]').forEach((item) => item.classList.remove('active'));
+        button.classList.add('active');
+        this.actions.onTransformMode(button.dataset.transform as 'translate' | 'rotate' | 'scale');
+      });
+    });
+    const nameInput = this.root.querySelector('#creature-name') as HTMLInputElement;
+    nameInput.addEventListener('change', () => this.actions.onCreatureName(nameInput.value.trim() || 'Untitled creature'));
+    (this.root.querySelector('#follow-camera') as HTMLInputElement).addEventListener('change', (event) => this.actions.onFollowCamera((event.target as HTMLInputElement).checked));
+    (this.root.querySelector('#click-move') as HTMLInputElement).addEventListener('change', (event) => this.actions.onClickToMove((event.target as HTMLInputElement).checked));
+    this.root.querySelector('#reset-position')!.addEventListener('click', this.actions.onResetPosition);
+    this.root.querySelector('#recover')!.addEventListener('click', this.actions.onRecover);
+    this.root.querySelector('#reset-objects')!.addEventListener('click', this.actions.onResetObjects);
+  }
+}
+
+function rangeField(label: string, field: string, value: number, min: number, max: number, step: number): string {
+  return `<label class="range-field"><span>${label}</span><input data-field="${field}" type="range" min="${min}" max="${max}" step="${step}" value="${value}"><output>${value.toFixed(2)}</output></label>`;
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>'"]/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[character]!);
+}
+
+function escapeAttribute(value: string): string {
+  return escapeHtml(value);
+}
